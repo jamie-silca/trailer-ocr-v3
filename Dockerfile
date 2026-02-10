@@ -16,15 +16,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Create separate directory for downloading paddle models
-RUN mkdir -p /root/.paddleocr
-
 COPY app /app/app
 
-# Create a non-root user? 
-# Paddle often tries to download models to home dir. 
-# Let's run as root for simplicity in download or configure home correctly.
-# Ideally use non-root, so let's set HOME.
+# Create a non-root user and set up model directory
 ENV HOME=/app
 
 RUN mkdir -p /app/.paddleocr && chmod -R 777 /app/.paddleocr
@@ -34,4 +28,5 @@ USER appuser
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+# Explicitly bind to port 8080, ignoring potential env var conflicts
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
