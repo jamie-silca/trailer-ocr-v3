@@ -1,0 +1,56 @@
+# Post-Mortem: PaddleOCR Implementation & Lessons Learned
+
+## 1. Overview
+This document provides a detailed account of the attempt to implement a production-grade OCR service using PaddleOCR and FastAPI. Despite achieving a successful build and container startup, the project was deemed unsuccessful due to extreme version instability, library conflicts, and fragile runtime dependencies.
+
+## 2. Technical Challenges (The "Version Hell")
+
+### A. PaddleOCR vs. PaddlePaddle Compatibility
+*   **The Conflict**: `paddleocr` (v2.7.3) has very strict, yet poorly documented, requirements for the underlying `paddlepaddle` engine.
+*   **The Error**: `AttributeError: 'paddle.base.libpaddle.AnalysisConfig' object has no attribute 'set_optimization_level'`.
+*   **Lesson**: Standard PyPI installations of `paddlepaddle` (v2.6.2+) changed internal APIs that the `paddleocr` library still expects. Finding a "stable" pairing required manual pinning typically found in regional Chinese mirrors rather than standard global PyPI.
+
+### B. The Segmentation Fault (OpenMP Issues)
+*   **The Symptom**: Random `Segmentation fault (core dumped)` or `SIGABRT` during model initialization.
+*   **The Cause**: Conflicts between the OpenMP libraries used by PaddlePaddle and other scientific libraries (like NumPy or OpenCV) on Linux.
+*   **The "Workaround"**: Required an ugly environment hack: `LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libgomp.so.1`.
+*   **Failure Point**: This makes the container highly non-portable and fragile across different Linux kernel/distro versions.
+
+### C. Argument Parsing Collision
+*   **The Bug**: `ValueError: Unknown argument: --host` (or `--port`).
+*   **Discovery**: PaddleOCR's internal codebase uses `argparse` at a global level. When running inside a Uvicorn/FastAPI wrapper, PaddleOCR tries to parse the web server's CLI arguments as its own.
+*   **The Fix**: Required "Argv Isolation" in `ocr_processor.py`:
+    ```python
+    import sys
+    _old_argv = sys.argv
+    sys.argv = [sys.argv[0]] # Wipe the args temporarily
+    self._ocr = PaddleOCR(...)
+    sys.argv = _old_argv # Restore them
+    ```
+
+### D. OpenCV Dependency Nightmare
+*   **The Conflict**: Three competing versions of OpenCV (`opencv-python`, `opencv-contrib-python`, `opencv-python-headless`) often get pulled in simultaneously by different sub-dependencies (imgaug, paddleocr, etc.).
+*   **The Result**: If more than one is installed, the `import cv2` command fails with binary mismatch errors or "symbol not found".
+*   **Solution attempt**: Manual uninstallation of all versions followed by a forced install of a specific headless version (`4.6.0.66`).
+
+## 3. Deployment & Build Issues
+
+### A. Cold Start & Model Baking
+*   **Problem**: Models (20MB - 100MB+) were downloaded *every time* the container started, making Cloud Run/Serverless deployments prohibitively slow.
+*   **Attempted Solution**: A `download_models.py` script was created to bake the models into the image during the Docker build stage. 
+*   **Complication**: The library itself would crash during the bake stage (Segfaults), requiring the download script to be rewritten using direct HTTP requests to bypass the library entirely.
+
+### B. Docker Image Size & Host Constraints
+*   **Environment**: Docker Desktop on Windows.
+*   **Pitfall**: The build requires significant temporary space (15GB+). If the host C: drive falls below ~4GB, the Docker build fails with cryptic `EOF` or `input/output` errors, often corrupting the local build cache.
+*   **Base Image**: Switched from `slim` to full `bullseye` to get necessary build-essential binaries, resulting in a significantly heavier image.
+
+## 4. Final Verdict: Why it failed
+1.  **Fragility**: The service required over 5 "hacks" (LD_PRELOAD, Argv wiping, CV2 manual cleanup, specific Debian version pinning) just to start.
+2.  **Maintainability**: A single patch to any dependency (NumPy, Pillow, etc.) would likely break the delicate balance, leading to a recurrence of Segmentation Faults.
+3.  **Complexity**: The overhead of maintaining the custom model-download logic and version pinning outweighs the benefits of the library.
+
+## 5. Recommendations for Future Attempts
+*   **Avoid PaddleOCR in Serverless**: If using serverless (Cloud Run/Lambda), use a service with a stable C++ backend or a managed OCR API (Google Vision, AWS Textract).
+*   **Isolate the Environment**: If PaddleOCR is mandatory, use it in a standalone, long-running VM rather than a scaling container.
+*   **Use Conda/Mamba**: For local dev, Conda handles the OpenMP and CUDA dependencies much better than standard `pip`.

@@ -17,15 +17,24 @@ class OcrProcessor:
         return cls._instance
 
     def _initialize(self):
-        logger.info("Initializing PaddleOCR 2.7.0...")
+        logger.info("Initializing PaddleOCR 2.7.3...")
         try:
-            # PaddleOCR 2.7.0 config - uses PP-OCRv4 by default
+            # PaddleOCR's internal codebase uses argparse at a global level.
+            # When running inside a Uvicorn/FastAPI wrapper, PaddleOCR tries to parse 
+            # the web server's CLI arguments as its own.
+            import sys
+            _old_argv = sys.argv
+            sys.argv = [sys.argv[0]]  # Wipe the args temporarily
+            
+            # PaddleOCR 2.7.0+ config - uses PP-OCRv4 by default
             self._ocr = PaddleOCR(
                 use_angle_cls=True,
                 lang='en',
                 use_gpu=False,
                 show_log=False
             )
+            
+            sys.argv = _old_argv  # Restore them
             logger.info("PaddleOCR initialized successfully.")
         except Exception as e:
             logger.error(f"Failed to initialize PaddleOCR: {e}")
