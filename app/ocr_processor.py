@@ -2,6 +2,7 @@ import logging
 import numpy as np
 from PIL import Image
 from paddleocr import PaddleOCR
+from app.utils import pad_small, postprocess_text
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -26,12 +27,15 @@ class OcrProcessor:
             _old_argv = sys.argv
             sys.argv = [sys.argv[0]]  # Wipe the args temporarily
             
-            # PaddleOCR 2.7.0+ config - uses PP-OCRv4 by default
+            # Optimized PaddleOCR parameters based on EXP-04 results
             self._ocr = PaddleOCR(
                 use_angle_cls=True,
                 lang='en',
                 use_gpu=False,
-                show_log=False
+                show_log=False,
+                det_db_thresh=0.2,
+                det_db_box_thresh=0.3,
+                det_db_unclip_ratio=2.0
             )
             
             sys.argv = _old_argv  # Restore them
@@ -46,7 +50,9 @@ class OcrProcessor:
         Returns (text, confidence) or (None, 0.0)
         """
         try:
-            img_array = np.array(image)
+            # EXP-03: Pad small crops before detection
+            processed_image = pad_small(image)
+            img_array = np.array(processed_image)
             
             # PaddleOCR 2.7.0 returns: [[box, (text, conf)], ...]
             result = self._ocr.ocr(img_array, cls=True)
@@ -70,6 +76,10 @@ class OcrProcessor:
             
             full_text = " ".join(detected_texts)
             avg_conf = sum(confidences) / len(confidences)
+            
+            # EXP-06: Domain-specific character substitution post-processing
+            full_text = postprocess_text(full_text)
+            
             logger.info(f"OCR Result: '{full_text}' ({avg_conf:.2f})")
             return full_text, avg_conf
             
