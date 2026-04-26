@@ -3,6 +3,7 @@ __pycache__/
 *$py.class
 .env
 .venv
+.venv-*/
 env/
 venv/
 ENV/
@@ -12,3 +13,7 @@ ENV/
 tests/dataset/
 tests/results/*.json
 tests/results/*.log
+tests/results/qwen_cache/
+tests/results/qwen_local_cache/
+tests/results/got_ocr_cache/
+tests/eval_results/

@@ -23,6 +23,10 @@ This service is configured to be easily deployed to Google Cloud Run using the "
     *   **Environment variables**: Click **Add Variable**.
         *   Name: `DETECTOR_URL`
         *   Value: The URL of your deployed detector service (e.g., `https://detector-service-xyz.a.run.app`). **Do not include the trailing slash.**
+    *   **Secret / variable** (EXP-25 portrait fallback — optional but recommended):
+        *   Name: `OPENROUTER_API_KEY`
+        *   Value: OpenRouter API key (`sk-or-v1-...`). Enables the Qwen3-VL fallback for portrait/stacked-vertical trailer-ID crops where PaddleOCR returns no text or a non-format-valid read. Without it, the service runs paddle-only.
+        *   Recommended: store as a **Secret** in Secret Manager and mount as the env var, rather than pasting the raw value.
 8.  **Create**: Click **Create**.
 
 ## Troubleshooting

@@ -42,5 +42,10 @@ USER appuser
 
 EXPOSE 8080
 
+# Required runtime env vars (set in Cloud Run service config):
+#   DETECTOR_URL          - URL of the trailer-detector service.
+#   OPENROUTER_API_KEY    - enables EXP-25 Qwen3-VL portrait fallback.
+#                           Without it the service runs paddle-only.
+
 # Explicitly bind to port 8080, ignoring potential env var conflicts
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
