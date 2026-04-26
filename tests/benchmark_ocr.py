@@ -70,6 +70,50 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--two-pass", action="store_true",
                         help="EXP-07: for portrait crops, run OCR at original + 90cw + 90ccw orientations "
                              "and return the highest-confidence result.")
+    parser.add_argument("--bbox-expand-ratio", type=float, default=0.0,
+                        help="EXP-09: expand each crop bbox by this fraction on each side before cropping "
+                             "(e.g. 0.1 = +10%% width and height). Default 0 = no expansion.")
+    parser.add_argument("--cascade", action="store_true",
+                        help="EXP-10: if first-pass OCR returns no text, retry with sharpen+dilate preprocessing.")
+    parser.add_argument("--min-conf", type=float, default=0.0,
+                        help="Drop OCR results below this confidence threshold (treat as no text). Default 0 = keep all.")
+    parser.add_argument("--format-rescore", choices=["off", "on"], default="off",
+                        help="EXP-15: enumerate character-confusion variants of OCR output and pick the "
+                             "candidate that best matches known trailer-ID formats (JBHZ/JBHU/R patterns). "
+                             "Applied after postprocess / postprocess_v2. Default 'off'.")
+    parser.add_argument("--stacked-vertical", choices=["off", "stitch", "per_letter"], default="off",
+                        help="EXP-13: for portrait crops (h > 2w), decode upright stacked-vertical text. "
+                             "'stitch' crops each letter quad and pastes them side-by-side into a synthetic "
+                             "horizontal strip before recognition. 'per_letter' runs OCR on each letter crop "
+                             "independently and concatenates. Default 'off' = standard pipeline.")
+    parser.add_argument("--rec-engine", choices=["paddle", "trocr"], default="paddle",
+                        help="EXP-20: recognition engine. 'trocr' swaps PaddleOCR for Microsoft TrOCR "
+                             "(VisionEncoderDecoder) end-to-end. Feeds the raw crop — no detection step. "
+                             "Incompatible with --stacked-vertical (needs paddle det geometry).")
+    parser.add_argument("--trocr-model", default="microsoft/trocr-base-printed",
+                        help="HuggingFace model id for --rec-engine=trocr. "
+                             "Options: microsoft/trocr-small-printed, microsoft/trocr-base-printed, "
+                             "microsoft/trocr-large-printed.")
+    parser.add_argument("--dataset", choices=["20260406", "20260423"], default="20260406",
+                        help="Dataset to benchmark against. Default '20260406' (the original blurry set). "
+                             "'20260423' is the cleaner follow-up set (251 imgs / 419 anns).")
+    parser.add_argument("--only-bucket", default="",
+                        help="If set, only process annotations whose aspect_ratio_bucket matches. "
+                             "Useful for portrait-only or wide-only subset runs.")
+    parser.add_argument("--portrait-strategy", choices=["off", "vlm", "qwen"], default="off",
+                        help="EXP-18 / EXP-25: portrait-crop (aspect < 0.5) routing. "
+                             "'vlm' = full replacement with Google Gemini (tests/vlm_portrait.py). "
+                             "'qwen' = cascade fallback: standard PaddleOCR pipeline runs first, "
+                             "Qwen3-VL-8B (via OpenRouter, tests/qwen_portrait.py) is invoked only "
+                             "when PaddleOCR returns no text on a portrait crop. "
+                             "Non-portrait crops use the standard pipeline. Default 'off'.")
+    parser.add_argument("--vlm-model", default="gemini-2.5-flash",
+                        help="Gemini model id for --portrait-strategy=vlm. "
+                             "e.g. gemini-2.5-flash, gemini-2.5-flash-lite.")
+    parser.add_argument("--qwen-model", default="qwen/qwen3-vl-8b-instruct",
+                        help="OpenRouter model id for --portrait-strategy=qwen. "
+                             "Default qwen/qwen3-vl-8b-instruct (EXP-25 winner). "
+                             "Override e.g. qwen/qwen3-vl-32b-instruct for ceiling reads.")
     # argparse will only see the benchmark's own args; sys.argv isolation is
     # handled in OcrProcessor for PaddleOCR. We parse known args only so that
     # running via `python tests/benchmark_ocr.py` (no args) still works.
@@ -81,8 +125,13 @@ def _parse_args() -> argparse.Namespace:
 
 ARGS = _parse_args()
 
-DATASET_DIR = PROJECT_ROOT / "tests" / "dataset" / "20260406"
-ANNOTATION_FILE = DATASET_DIR / "annotations_2026-04-06_09-06_coco_with_text.json"
+_DATASETS = {
+    "20260406": ("20260406", "annotations_2026-04-06_09-06_coco_with_text.json"),
+    "20260423": ("20260423", "annotations_2026-04-23_11-24_coco_with_text.json"),
+}
+_ds_dir, _ds_ann = _DATASETS[ARGS.dataset]
+DATASET_DIR = PROJECT_ROOT / "tests" / "dataset" / _ds_dir
+ANNOTATION_FILE = DATASET_DIR / _ds_ann
 RESULTS_DIR = PROJECT_ROOT / "tests" / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -93,6 +142,12 @@ LOG_FILE = RESULTS_DIR / f"{_file_prefix}.log"
 RESULTS_JSON = RESULTS_DIR / f"{_file_prefix}.json"
 
 PREPROCESS_FLAGS: list[str] = [f.strip() for f in ARGS.preprocess.split(",") if f.strip()]
+
+# EXP-25: trailer-ID format whitelist used to gate the Qwen cascade. Mirrors
+# tests/qwen_portrait.py:FORMAT_RE so format-miss detection is consistent
+# across the cascade trigger and the processor's internal gate.
+import re as _re
+_PORTRAIT_FORMAT_RE = _re.compile(r"^(JBHZ\d{6}|JBHU\d{6}|R\d{5})$")
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -120,9 +175,20 @@ def _configure_logging():
 _configure_logging()
 logger = logging.getLogger("ocr_benchmark")
 
-# Imports after logging setup (OcrProcessor import triggers PaddleOCR import)
+# Imports after logging setup (OcrProcessor import triggers PaddleOCR import).
+# Pre-import torch when using TrOCR — torch and paddle share a DLL that must be
+# loaded torch-first on Windows, else torch raises WinError 127 on shm.dll.
+if ARGS.rec_engine == "trocr":
+    import torch  # noqa: F401, E402
 from app.ocr_processor import OcrProcessor  # noqa: E402
-from preprocessing import apply_preprocessing, postprocess_text, get_portrait_rotations  # noqa: E402
+from app.utils import format_rescore  # noqa: E402
+from preprocessing import (  # noqa: E402
+    apply_preprocessing,
+    postprocess_text,
+    postprocess_v2,
+    get_portrait_rotations,
+    decode_stacked_vertical,
+)
 
 # ── OCR config patching for experiments that change PaddleOCR params ─────────
 # If non-default detection params are passed, patch OcrProcessor._initialize
@@ -327,13 +393,31 @@ def run_benchmark():
         )
 
     # Init OCR (warm-up happens here)
-    logger.info("Initialising OcrProcessor (PaddleOCR warm-up)...")
-    warmup_start = time.perf_counter()
-    ocr = OcrProcessor()
+    if ARGS.rec_engine == "trocr":
+        from trocr_processor import TrocrProcessor
+        logger.info(f"Initialising TrocrProcessor ({ARGS.trocr_model})...")
+        warmup_start = time.perf_counter()
+        ocr = TrocrProcessor(ARGS.trocr_model)
+    else:
+        logger.info("Initialising OcrProcessor (PaddleOCR warm-up)...")
+        warmup_start = time.perf_counter()
+        ocr = OcrProcessor()
     warmup_elapsed = time.perf_counter() - warmup_start
     # PaddleOCR model init resets root-logger — restore ours
     _configure_logging()
     logger.info(f"OcrProcessor ready in {warmup_elapsed:.2f}s")
+
+    vlm = None
+    if ARGS.portrait_strategy == "vlm":
+        from vlm_portrait import VlmPortraitProcessor
+        logger.info(f"Initialising VlmPortraitProcessor ({ARGS.vlm_model})...")
+        vlm = VlmPortraitProcessor(ARGS.vlm_model)
+
+    qwen = None
+    if ARGS.portrait_strategy == "qwen":
+        from qwen_portrait import QwenPortraitProcessor
+        logger.info(f"Initialising QwenPortraitProcessor ({ARGS.qwen_model})...")
+        qwen = QwenPortraitProcessor(ARGS.qwen_model)
 
     # Group annotations by image for efficient loading
     anns_by_image: dict[int, list] = {}
@@ -374,7 +458,22 @@ def run_benchmark():
             bbox = ann["bbox"]
             ground_truth = ann.get("text")
 
-            crop = crop_absolute(image, bbox)
+            # EXP-09: expand bbox by ratio before cropping
+            if ARGS.bbox_expand_ratio > 0:
+                x, y, w, h = bbox
+                img_w, img_h = image.size
+                exp_w = w * ARGS.bbox_expand_ratio
+                exp_h = h * ARGS.bbox_expand_ratio
+                exp_bbox = [
+                    max(0.0, x - exp_w / 2),
+                    max(0.0, y - exp_h / 2),
+                    min(w + exp_w, img_w - max(0.0, x - exp_w / 2)),
+                    min(h + exp_h, img_h - max(0.0, y - exp_h / 2)),
+                ]
+                crop = crop_absolute(image, exp_bbox)
+            else:
+                crop = crop_absolute(image, bbox)
+
             if crop is None:
                 logger.warning(f"  Ann {ann_id}: invalid crop bbox {bbox}, skipping")
                 skipped_crops += 1
@@ -382,14 +481,45 @@ def run_benchmark():
 
             orig_w, orig_h = crop.size
 
+            if ARGS.only_bucket and aspect_ratio_bucket(orig_w, orig_h) != ARGS.only_bucket:
+                continue
+
             # Apply experiment preprocessing
             processed_crop, preprocessing_applied = apply_preprocessing(crop, PREPROCESS_FLAGS)
             proc_w, proc_h = processed_crop.size
 
-            # Time the OCR call (EXP-07: two-pass for portrait crops)
+            # Time the OCR call
             t0 = time.perf_counter()
-            if ARGS.two_pass and processed_crop.width < processed_crop.height:
-                # Try original + 90cw + 90ccw; pick highest confidence
+            # EXP-18: VLM fallback for portrait crops — highest priority portrait
+            # branch when enabled. Gate matches aspect_ratio_bucket == "portrait"
+            # (w/h < 0.5, i.e. h > 2w). Non-portrait crops skip this entirely.
+            if (
+                ARGS.portrait_strategy == "vlm"
+                and vlm is not None
+                and processed_crop.height > 2 * processed_crop.width
+            ):
+                ocr_text, ocr_conf = vlm.process_image(processed_crop)
+                preprocessing_applied.append(
+                    f"vlm:{ARGS.vlm_model}:{'hit' if ocr_text else 'miss'}"
+                )
+            elif (
+                ARGS.stacked_vertical != "off"
+                and processed_crop.height > 2 * processed_crop.width
+            ):
+                sv_text, sv_conf, sv_ops = decode_stacked_vertical(
+                    processed_crop, ocr, variant=ARGS.stacked_vertical
+                )
+                preprocessing_applied.extend(sv_ops)
+                if sv_text is not None:
+                    ocr_text, ocr_conf = sv_text, sv_conf
+                else:
+                    # Too few detected letter boxes → fall through to standard
+                    # pipeline so we don't regress crops the shape gate
+                    # misidentified as stacked-vertical.
+                    ocr_text, ocr_conf = ocr.process_image(processed_crop)
+                    preprocessing_applied.append("stacked_vertical:fallthrough_to_standard")
+            elif ARGS.two_pass and processed_crop.width < processed_crop.height:
+                # EXP-07: try original + 90cw + 90ccw; pick highest confidence
                 candidates = get_portrait_rotations(processed_crop)
                 best_text, best_conf, best_label = None, 0.0, "original"
                 for cand_img, cand_label in candidates:
@@ -403,12 +533,72 @@ def run_benchmark():
                 ocr_text, ocr_conf = ocr.process_image(processed_crop)
             elapsed_ms = (time.perf_counter() - t0) * 1000
 
+            # EXP-25: portrait-only Qwen3-VL fallback. Fires on portrait crops
+            # when PaddleOCR returned (a) no text, OR (b) text that doesn't
+            # match the trailer-ID format whitelist (catches PaddleOCR's
+            # hallucinated horizontal-text reads on stacked-vertical crops).
+            # Preserves PaddleOCR's format-valid answers (numerics, lucky reads)
+            # by construction; only overwrites ocr_text if Qwen returns a
+            # format-valid result, otherwise leaves PaddleOCR's output for
+            # downstream postprocess/format_rescore to attempt.
+            if (
+                ARGS.portrait_strategy == "qwen"
+                and qwen is not None
+                and processed_crop.height > 2 * processed_crop.width
+            ):
+                paddle_text_clean = (ocr_text or "").upper().replace(" ", "")
+                paddle_format_ok = bool(_PORTRAIT_FORMAT_RE.match(paddle_text_clean))
+                if not ocr_text or not paddle_format_ok:
+                    t_qw = time.perf_counter()
+                    qwen_text, qwen_conf = qwen.process_image(processed_crop)
+                    elapsed_ms += (time.perf_counter() - t_qw) * 1000
+                    if qwen_text:
+                        ocr_text, ocr_conf = qwen_text, qwen_conf
+                        preprocessing_applied.append(
+                            f"qwen_fallback:{ARGS.qwen_model}:hit"
+                        )
+                    else:
+                        preprocessing_applied.append(
+                            f"qwen_fallback:{ARGS.qwen_model}:miss"
+                        )
+
+            # EXP-10: cascade retry — if no text, retry with sharpen+dilate fallback
+            if ARGS.cascade and not ocr_text:
+                fallback_crop, fallback_ops = apply_preprocessing(processed_crop, ["sharpen", "dilate"])
+                t_fb = time.perf_counter()
+                ocr_text, ocr_conf = ocr.process_image(fallback_crop)
+                elapsed_ms += (time.perf_counter() - t_fb) * 1000
+                if ocr_text:
+                    preprocessing_applied.extend([f"cascade:{op}" for op in fallback_ops])
+
             # EXP-06: post-processing character substitution
             if "postprocess" in PREPROCESS_FLAGS and ocr_text:
                 ocr_text_raw = ocr_text
                 ocr_text = postprocess_text(ocr_text)
                 if ocr_text != ocr_text_raw:
                     preprocessing_applied.append(f"postprocessed:{repr(ocr_text_raw)}->{repr(ocr_text)}")
+
+            # EXP-08: improved positional postprocessing
+            if "postprocess_v2" in PREPROCESS_FLAGS and ocr_text:
+                ocr_text_raw = ocr_text
+                ocr_text = postprocess_v2(ocr_text)
+                if ocr_text != ocr_text_raw:
+                    preprocessing_applied.append(f"postprocessed_v2:{repr(ocr_text_raw)}->{repr(ocr_text)}")
+
+            # EXP-15: format-aware candidate rescoring
+            if ARGS.format_rescore == "on" and ocr_text:
+                ocr_text_raw = ocr_text
+                ocr_text, rescore_note = format_rescore(ocr_text)
+                if rescore_note == "rescored":
+                    preprocessing_applied.append(
+                        f"format_rescore:{repr(ocr_text_raw)}->{repr(ocr_text)}"
+                    )
+
+            # Confidence gate: drop below --min-conf threshold
+            if ARGS.min_conf > 0 and ocr_conf is not None and ocr_conf < ARGS.min_conf:
+                ocr_text = None
+                ocr_conf = 0.0
+                preprocessing_applied.append(f"conf_filtered(<{ARGS.min_conf})")
 
             # Accuracy
             exact_match = None

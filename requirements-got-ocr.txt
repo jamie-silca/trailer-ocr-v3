@@ -1,0 +1,12 @@
+# EXP-26 - GOT-OCR-2.0-hf isolated venv (.venv-got-ocr/).
+# CPU-only torch wheels via the explicit index URL.
+# transformers >= 4.49 is the version that upstreamed GotOcr2ForConditionalGeneration.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+transformers>=4.49.0,<4.55
+torch>=2.2.0,<2.5
+huggingface_hub>=0.24.0
+accelerate>=0.30.0
+pillow>=10.0.0
+requests>=2.31.0
+verovio>=4.3.0  # Required by GOT-OCR-2.0's chat() helper for sheet-music mode; small dep, harmless for OCR mode.

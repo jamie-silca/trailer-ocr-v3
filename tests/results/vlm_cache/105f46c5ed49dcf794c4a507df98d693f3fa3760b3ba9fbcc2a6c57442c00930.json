@@ -1,0 +1,14 @@
+{
+  "model": "gemini-2.5-flash",
+  "prompt_version": "v1",
+  "crop_size": [
+    129,
+    768
+  ],
+  "raw": "JBHZ600004",
+  "latency_ms": 3742.28,
+  "input_tokens": 332,
+  "output_tokens": 9,
+  "finish_reason": "FinishReason.STOP",
+  "attempts": 3
+}

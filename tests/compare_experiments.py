@@ -33,6 +33,10 @@ EXPERIMENTS = {
     "EXP-05-480": "benchmark_EXP-05-480_20260416_011759.json",
     "EXP-05-640": "benchmark_EXP-05-640_20260416_011951.json",
     "EXP-07": "benchmark_EXP-07_20260416_013420.json",
+    "EXP-08": "benchmark_EXP-08_20260420_175409.json",
+    "EXP-09": "benchmark_EXP-09_20260420_175919.json",
+    "EXP-10": "benchmark_EXP-10_20260420_180153.json",
+    "EXP-09+10": "benchmark_EXP-09-10_20260420_180525.json",
 }
 
 EXPERIMENT_DESCRIPTIONS = {
@@ -49,6 +53,10 @@ EXPERIMENT_DESCRIPTIONS = {
     "EXP-05-480": "det_limit_side_len = 480",
     "EXP-05-640": "det_limit_side_len = 640",
     "EXP-07": "Two-pass OCR for portrait crops (original + 90cw + 90ccw, best confidence)",
+    "EXP-08": "Improved positional postprocessing (digit-in-prefix fix, H→8 in digit context)",
+    "EXP-09": "10% YOLO bbox expansion before crop (pixel context from real image edges)",
+    "EXP-10": "Cascade retry: on no-text, retry with sharpen+dilate fallback preprocessing",
+    "EXP-09+10": "Bbox expansion + cascade retry (combined)",
 }
 
 # 2-3 sentences per experiment: what changed, why, and expected effect.
@@ -116,6 +124,26 @@ EXPERIMENT_HYPOTHESES = {
         "The hypothesis was that some portrait crops may contain text oriented differently (rotated CW vs CCW), and a multi-orientation approach would be more robust than EXP-01's single fixed rotation by covering all possible orientations. "
         "Expected +1-3pp beyond EXP-01 on the portrait subset, at the cost of up to 3x slower processing for the 156 portrait crops."
     ),
+    "EXP-08": (
+        "Adds an improved positional character substitution pass on top of EXP-03+04+06: digits in the 4-character alpha prefix are forced to their nearest letter (0->O, 1->I, 5->S, 6->G, 8->B), and H is added to the digit-context substitution table (H->8). "
+        "OcrProcessor already applies EXP-06 character substitution internally; this experiment runs an additional pass with the expanded ruleset to catch cases the conservative EXP-06 rules miss. "
+        "Expected +0.5-2pp marginal improvement with zero speed cost."
+    ),
+    "EXP-09": (
+        "Each YOLO bounding box is expanded by 10% on each side before cropping, so the crop includes a ring of real image pixels around the annotated region instead of the neutral-grey padding added by EXP-03. "
+        "The hypothesis was that EXP-03's neutral-grey padding provides spatial context that prevents the detection stage from fast-failing, but real surrounding pixels should provide richer features — especially for trailer IDs that bleed close to the bbox edge. "
+        "Expected +2-5pp improvement on the wide and landscape subsets, with a slight speed increase from larger crops."
+    ),
+    "EXP-10": (
+        "Implements a two-pass cascade: the first pass runs the standard EXP-03+04+06 pipeline; if no text is detected, a fallback retry applies PIL UnsharpMask sharpening and morphological dilation (2x2 kernel, 1 iteration) to thicken and sharpen strokes before retrying OCR. "
+        "The hypothesis was that the 244 no-text crops contain faint or blurry text that sharpening and stroke thickening could make legible, and that restricting the expensive fallback to the failing 36% of crops keeps the average latency acceptable. "
+        "Expected +1-4pp accuracy from rescued crops, at a cost of ~20-40ms average latency increase."
+    ),
+    "EXP-09+10": (
+        "Combines EXP-09 (10% bbox expansion) and EXP-10 (cascade sharpen+dilate retry) to test whether their effects compound. "
+        "The rationale is that expanded crops reduce the no-text rate, so the cascade operates on a smaller pool of harder failures — potentially making its signal-to-noise better than EXP-10 alone. "
+        "Expected at least additive improvement (+3.5-6pp) if the two techniques target different sub-populations of failing crops."
+    ),
 }
 
 EXPERIMENT_VERDICTS = {
@@ -132,6 +160,30 @@ EXPERIMENT_VERDICTS = {
     "EXP-05-480": "NEUTRAL",
     "EXP-05-640": "NEUTRAL",
     "EXP-07": "REJECTED",
+    "EXP-08": "NEUTRAL",
+    "EXP-09": "NEW BEST CONFIG",
+    "EXP-10": "ACCEPTED (marginal)",
+    "EXP-09+10": "ACCEPTED (marginal)",
+}
+
+EXPERIMENT_RESULT_SUMMARIES = {
+    "BASE-01": "Establishing a baseline accuracy of 22.3%, this run highlights that nearly 60% of annotations (primarily small or vertical crops) are ignored by default.",
+    "BASE-01-VERIFY": "Successfully validated the new benchmark harness consistency by reproducing identical accuracy results (22.3%), while noting minor speed variability likely due to environmental noise.",
+    "EXP-01": "Proved that 90° rotation alone does not unlock portrait text, as the resulting horizontal images—often under 40px tall—remain below the recognition model's effective threshold.",
+    "EXP-01B": "Demonstrated that Lanczos upscaling of rotated crops is counterproductive; interpolation fails to reconstruct the fine stroke detail required for confident character discrimination.",
+    "EXP-02": "Catastrophic failure (-9.9pp accuracy) suggests that CLAHE-induced noise or boundary artifacts severely confuse the DB detector on drone-derived crops.",
+    "EXP-03": "Outstanding success (+8.1pp) proving that the \"small crop\" problem is primarily a context/padding issue for the detector rather than an inherent recognition limit.",
+    "EXP-04": "Successfully increased recall by +2.3pp, capturing \"borderline\" but correct detections that the default thresholds were aggressively discarding.",
+    "EXP-03+04": "**Best Performance (Round 1):** Verified a highly effective additive relationship between padding and sensitivity, raising baseline accuracy by over 50% (from 22.3% to 34.7%).",
+    "EXP-03+04+06": "Adding character substitution provided a marginal +0.1pp gain, indicating that detection failures are a significantly higher priority than character-level confusion.",
+    "EXP-05-320": "Neutral results across all resize limits indicate that PaddleOCR's internal upscaling to 960px is robust and not a source of performance degradation for small crops.",
+    "EXP-05-480": "Neutral results across all resize limits indicate that PaddleOCR's internal upscaling to 960px is robust and not a source of performance degradation for small crops.",
+    "EXP-05-640": "Neutral results across all resize limits indicate that PaddleOCR's internal upscaling to 960px is robust and not a source of performance degradation for small crops.",
+    "EXP-07": "Confirmed that even a comprehensive 3-pass multi-orientation approach cannot overcome the resolution bottleneck for portraits, while adding an unacceptable 16% speed penalty.",
+    "EXP-08": "Running postprocess_v2 on top of OcrProcessor's already-applied EXP-06 rules provides no net gain; double-postprocessing is idempotent for well-matched text and marginally harmful where the expanded ruleset applies conflicting substitutions. The improved rules need to replace, not stack on, the existing substitution.",
+    "EXP-09": "**New Best Config:** Providing real image context via 10% bbox expansion is more effective than neutral-grey padding (EXP-03). The wider crops give the DB detector richer surrounding features, boosting wide-format accuracy from 46.9% to 51.4% and delivering a net +3.4pp gain with no precision loss.",
+    "EXP-10": "Cascade retry rescued 9 previously-blank crops, but 8 of the 9 were wrong predictions — a 11% success rate on the hardest failures. Sharpen+dilate finds signals that the model cannot reliably decode, adding noise more than signal. The speed overhead (+18ms median) is also unattractive for only +0.2pp accuracy at the cost of -0.9pp precision.",
+    "EXP-09+10": "Combining bbox expansion with cascade retry compounded to +3.6pp accuracy (vs +3.4pp for EXP-09 alone), adding exactly 1 more correct prediction. However, the cascade's drag on precision (57.0% vs EXP-09's 57.6%) and +31ms median latency penalty make EXP-09 alone the recommended production config unless raw recall is the priority.",
 }
 
 
@@ -252,6 +304,13 @@ def generate_report(output_path: str | None = None):
         print("ERROR: BASE-01 not found")
         return
 
+    # Load EXP-11 temporal aggregation results if available
+    exp11_data = None
+    exp11_files = sorted(RESULTS_DIR.glob("benchmark_EXP-11_*.json"), reverse=True)
+    if exp11_files:
+        with open(exp11_files[0]) as f:
+            exp11_data = json.load(f)
+
     lines: list[str] = []
     def w(s: str = ""):
         lines.append(s)
@@ -280,6 +339,10 @@ def generate_report(output_path: str | None = None):
         d_acc = delta_str(a["correct_pct"], base["accuracy"]["correct_pct"], "pp")
         d_spd = delta_str(sp["median"], base["speed"]["median"], "ms", higher_is_better=False)
         w(f"| {exp_id} | {verdict} | {a['text_returned']} ({a['text_returned_pct']}%) | {a['correct']}/{a['total']} | {a['correct_pct']}% | {d_acc} | {a['precision_pct']}% | {sp['median']} | {d_spd} |")
+    # EXP-11 is a different metric (per-track, not per-annotation) — add as a note row
+    if exp11_data:
+        pt = exp11_data["per_track_accuracy"]["all_tracks"]
+        w(f"| EXP-11 | SPECIAL ANALYSIS | — | {pt['correct']}/{pt['total']} tracks | {pt['correct_pct']}% per-track | — | {pt['precision_pct']}% | — (no re-OCR) | — |")
     w()
 
     # ── Detailed per-experiment sections ──
@@ -306,24 +369,7 @@ def generate_report(output_path: str | None = None):
             w(f"> {hypothesis}")
             w()
 
-        # Speed
-        w("#### Speed (per annotation, OCR call only)")
-        w()
-        w("| Metric | Value | Δ vs BASE-01 |")
-        w("|---|---|---|")
-        w(f"| Average | {sp['average']} ms | {delta_str(sp['average'], base['speed']['average'], 'ms', False)} |")
-        w(f"| **Median** | **{sp['median']} ms** | **{delta_str(sp['median'], base['speed']['median'], 'ms', False)}** |")
-        w(f"| Std dev | {sp['stdev']} ms | {delta_str(sp['stdev'], base['speed']['stdev'], 'ms', False)} |")
-        w(f"| Min | {sp['min']} ms | |")
-        w(f"| Max | {sp['max']} ms | |")
-        w(f"| p90 | {sp['p90']} ms | {delta_str(sp['p90'], base['speed']['p90'], 'ms', False)} |")
-        w(f"| p95 | {sp['p95']} ms | {delta_str(sp['p95'], base['speed']['p95'], 'ms', False)} |")
-        w(f"| p99 | {sp['p99']} ms | {delta_str(sp['p99'], base['speed']['p99'], 'ms', False)} |")
-        w(f"| Wall time | {s['wall_time_s']}s | |")
-        w(f"| Throughput | {s['throughput']} ann/s | |")
-        w()
-
-        # Accuracy
+        # Accuracy (before speed, matching original report format)
         w("#### Accuracy")
         w()
         w("| Metric | Value | Δ vs BASE-01 |")
@@ -345,6 +391,81 @@ def generate_report(output_path: str | None = None):
             base_sub = base["subsets"].get(bucket, {"correct_pct": 0})
             d = delta_str(sub["correct_pct"], base_sub["correct_pct"], "pp")
             w(f"| {bucket} | {sub['total']} | {sub['correct']} | {sub['correct_pct']}% | {d} | {sub['text_returned']} ({sub['text_returned_pct']}%) |")
+        w()
+
+        # Speed
+        w("#### Speed (per annotation, OCR call only)")
+        w()
+        w("| Metric | Value | Δ vs BASE-01 |")
+        w("|---|---|---|")
+        w(f"| Average | {sp['average']} ms | {delta_str(sp['average'], base['speed']['average'], 'ms', False)} |")
+        w(f"| **Median** | **{sp['median']} ms** | **{delta_str(sp['median'], base['speed']['median'], 'ms', False)}** |")
+        w(f"| Std dev | {sp['stdev']} ms | {delta_str(sp['stdev'], base['speed']['stdev'], 'ms', False)} |")
+        w(f"| Min | {sp['min']} ms | |")
+        w(f"| Max | {sp['max']} ms | |")
+        w(f"| p90 | {sp['p90']} ms | {delta_str(sp['p90'], base['speed']['p90'], 'ms', False)} |")
+        w(f"| p95 | {sp['p95']} ms | {delta_str(sp['p95'], base['speed']['p95'], 'ms', False)} |")
+        w(f"| p99 | {sp['p99']} ms | {delta_str(sp['p99'], base['speed']['p99'], 'ms', False)} |")
+        w(f"| Wall time | {s['wall_time_s']}s | |")
+        w(f"| Throughput | {s['throughput']} ann/s | |")
+        w()
+
+        summary = EXPERIMENT_RESULT_SUMMARIES.get(exp_id, "")
+        if summary:
+            w(f"**Result Summary:** {summary}")
+            w()
+
+        w("---")
+        w()
+
+    # ── EXP-11: Temporal aggregation special section ──────────────────────────
+    if exp11_data:
+        w("## EXP-11 — Temporal Aggregation Analysis (post-hoc, no re-OCR)")
+        w()
+        w("**Verdict: SPECIAL ANALYSIS**")
+        w()
+        w("> Groups all annotations that share the same ground-truth trailer ID (i.e. the same physical trailer appearing in multiple consecutive drone frames) and applies confidence-weighted majority voting to select one prediction per trailer. "
+          "No additional OCR is needed — this runs post-hoc on the EXP-03+04+06 result JSON. "
+          "The ground-truth grouping gives an upper bound on what a real visual tracker could achieve; in production, tracks would be formed by IoU-based bbox linking across adjacent frames.")
+        w()
+
+        pt_all = exp11_data["per_track_accuracy"]["all_tracks"]
+        pt_multi = exp11_data["per_track_accuracy"]["multi_frame_only"]
+        ts = exp11_data["track_summary"]
+
+        w("#### Track Summary")
+        w()
+        w("| Metric | Value |")
+        w("|---|---|")
+        w(f"| Total unique trailers (tracks) | {ts['total_tracks']} |")
+        w(f"| Single-frame tracks | {ts['single_frame']} (no temporal benefit possible) |")
+        w(f"| Multi-frame tracks | {ts['multi_frame']} (>= 2 frames) |")
+        w()
+
+        w("#### Per-Track Accuracy (confidence-weighted majority vote)")
+        w()
+        w("| Scope | Correct | Total | Accuracy | Precision |")
+        w("|---|---|---|---|---|")
+        w(f"| All tracks | {pt_all['correct']} | {pt_all['total']} | {pt_all['correct_pct']}% | {pt_all['precision_pct']}% |")
+        w(f"| Multi-frame tracks only | {pt_multi['correct']} | {pt_multi['total']} | {pt_multi['correct_pct']}% | {pt_multi['precision_pct']}% |")
+        w(f"| Multi-frame per-annotation baseline | — | — | {pt_multi['per_ann_baseline_correct_pct']}% | — |")
+        w()
+        w(f"**Temporal gain on multi-frame trailers: +{pt_multi['correct_pct'] - pt_multi['per_ann_baseline_correct_pct']:.1f}pp** (from {pt_multi['per_ann_baseline_correct_pct']}% per-annotation to {pt_multi['correct_pct']}% per-track)")
+        w()
+
+        # Confidence sweep
+        w("#### Confidence Threshold Sweep (per annotation, no re-OCR)")
+        w()
+        w("Dropping low-confidence results trades a small recall loss for significant precision gain.")
+        w()
+        w("| Min Confidence | Results Kept | Exact Match % | Precision |")
+        w("|---|---|---|---|")
+        for s in exp11_data["confidence_sweep"]:
+            w(f"| >= {s['threshold']:.1f} | {s['kept']} ({s['kept_pct']}%) | {s['correct_pct']}% | {s['precision_pct']}% |")
+        w()
+        w("**Result Summary:** Confidence-weighted majority voting raises per-track accuracy from 38.2% to 48.1% on multi-frame trailers (+9.9pp). "
+          "For 50% of trailers that appear in only one frame, temporal aggregation provides no benefit. "
+          "A confidence threshold of 0.6 boosts precision from 54.7% to 61.5% at a cost of only -0.3pp exact-match accuracy — a favourable trade for applications where wrong IDs are more costly than missed ones.")
         w()
         w("---")
         w()
