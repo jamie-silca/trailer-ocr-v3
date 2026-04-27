@@ -100,12 +100,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--only-bucket", default="",
                         help="If set, only process annotations whose aspect_ratio_bucket matches. "
                              "Useful for portrait-only or wide-only subset runs.")
-    parser.add_argument("--portrait-strategy", choices=["off", "vlm", "qwen"], default="off",
-                        help="EXP-18 / EXP-25: portrait-crop (aspect < 0.5) routing. "
+    parser.add_argument("--portrait-strategy", choices=["off", "vlm", "qwen", "qwen-first"], default="off",
+                        help="EXP-18 / EXP-25 / EXP-28: portrait-crop (aspect < 0.5) routing. "
                              "'vlm' = full replacement with Google Gemini (tests/vlm_portrait.py). "
                              "'qwen' = cascade fallback: standard PaddleOCR pipeline runs first, "
                              "Qwen3-VL-8B (via OpenRouter, tests/qwen_portrait.py) is invoked only "
-                             "when PaddleOCR returns no text on a portrait crop. "
+                             "when PaddleOCR returns no text or format-invalid text on a portrait crop. "
+                             "'qwen-first' = EXP-28: Qwen is called directly on portrait crops, "
+                             "paddle is skipped entirely; returns None (no-text) when Qwen rejects "
+                             "(UNKNOWN), never falling back to paddle garbage. "
                              "Non-portrait crops use the standard pipeline. Default 'off'.")
     parser.add_argument("--vlm-model", default="gemini-2.5-flash",
                         help="Gemini model id for --portrait-strategy=vlm. "
@@ -414,7 +417,7 @@ def run_benchmark():
         vlm = VlmPortraitProcessor(ARGS.vlm_model)
 
     qwen = None
-    if ARGS.portrait_strategy == "qwen":
+    if ARGS.portrait_strategy in ("qwen", "qwen-first"):
         from qwen_portrait import QwenPortraitProcessor
         logger.info(f"Initialising QwenPortraitProcessor ({ARGS.qwen_model})...")
         qwen = QwenPortraitProcessor(ARGS.qwen_model)
@@ -501,6 +504,20 @@ def run_benchmark():
                 ocr_text, ocr_conf = vlm.process_image(processed_crop)
                 preprocessing_applied.append(
                     f"vlm:{ARGS.vlm_model}:{'hit' if ocr_text else 'miss'}"
+                )
+            elif (
+                ARGS.portrait_strategy == "qwen-first"
+                and qwen is not None
+                and processed_crop.height > 2 * processed_crop.width
+            ):
+                # EXP-28: Qwen-first — skip paddle entirely for portrait crops.
+                # On UNKNOWN/format-miss, return None rather than exposing
+                # paddle's garbage (the source of the 9 worst wrong-text cases
+                # in EXP-25).
+                qwen_text, qwen_conf = qwen.process_image(processed_crop)
+                ocr_text, ocr_conf = qwen_text, qwen_conf
+                preprocessing_applied.append(
+                    f"qwen_first:{ARGS.qwen_model}:{'hit' if qwen_text else 'miss'}"
                 )
             elif (
                 ARGS.stacked_vertical != "off"
