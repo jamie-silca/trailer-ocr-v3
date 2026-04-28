@@ -146,12 +146,6 @@ RESULTS_JSON = RESULTS_DIR / f"{_file_prefix}.json"
 
 PREPROCESS_FLAGS: list[str] = [f.strip() for f in ARGS.preprocess.split(",") if f.strip()]
 
-# EXP-25: trailer-ID format whitelist used to gate the Qwen cascade. Mirrors
-# tests/qwen_portrait.py:FORMAT_RE so format-miss detection is consistent
-# across the cascade trigger and the processor's internal gate.
-import re as _re
-_PORTRAIT_FORMAT_RE = _re.compile(r"^(JBHZ\d{6}|JBHU\d{6}|R\d{5})$")
-
 # ── Logging ───────────────────────────────────────────────────────────────────
 
 def _configure_logging():
@@ -563,21 +557,18 @@ def run_benchmark():
                 and qwen is not None
                 and processed_crop.height > 2 * processed_crop.width
             ):
-                paddle_text_clean = (ocr_text or "").upper().replace(" ", "")
-                paddle_format_ok = bool(_PORTRAIT_FORMAT_RE.match(paddle_text_clean))
-                if not ocr_text or not paddle_format_ok:
-                    t_qw = time.perf_counter()
-                    qwen_text, qwen_conf = qwen.process_image(processed_crop)
-                    elapsed_ms += (time.perf_counter() - t_qw) * 1000
-                    if qwen_text:
-                        ocr_text, ocr_conf = qwen_text, qwen_conf
-                        preprocessing_applied.append(
-                            f"qwen_fallback:{ARGS.qwen_model}:hit"
-                        )
-                    else:
-                        preprocessing_applied.append(
-                            f"qwen_fallback:{ARGS.qwen_model}:miss"
-                        )
+                t_qw = time.perf_counter()
+                qwen_text, qwen_conf = qwen.process_image(processed_crop)
+                elapsed_ms += (time.perf_counter() - t_qw) * 1000
+                if qwen_text:
+                    ocr_text, ocr_conf = qwen_text, qwen_conf
+                    preprocessing_applied.append(
+                        f"qwen_fallback:{ARGS.qwen_model}:hit"
+                    )
+                else:
+                    preprocessing_applied.append(
+                        f"qwen_fallback:{ARGS.qwen_model}:miss"
+                    )
 
             # EXP-10: cascade retry — if no text, retry with sharpen+dilate fallback
             if ARGS.cascade and not ocr_text:

@@ -1,6 +1,5 @@
 import logging
 import os
-import re
 
 import numpy as np
 from PIL import Image
@@ -10,10 +9,6 @@ from app.utils import pad_small, postprocess_text, sharpen, dilate
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Trailer-ID format whitelist (EXP-25). Used both to gate paddle output and to
-# decide whether the qwen portrait fallback should fire.
-_PORTRAIT_FORMAT_RE = re.compile(r"^(JBHZ\d{6}|JBHU\d{6}|R\d{5})$")
 
 
 class OcrProcessor:
@@ -95,23 +90,20 @@ class OcrProcessor:
                 if text:
                     logger.info(f"Cascade Retry successful: '{text}'")
 
-            # 3. EXP-25: Portrait Qwen3-VL fallback. Fires on portrait crops
-            # (h > 2w, i.e. stacked-vertical) when paddle returned (a) no text
-            # OR (b) text that doesn't match the trailer-ID whitelist (catches
-            # paddle's hallucinated horizontal reads on stacked-vertical IDs).
-            # Preserves paddle's format-valid answers (R+5digits, JBHU/JBHZ+6d
-            # lucky reads) by construction.
+            # 3. EXP-25: Portrait Qwen3-VL fallback. Always fires on portrait
+            # crops (h > 2w, i.e. stacked-vertical). Paddle's format-valid rate
+            # on portrait is 0% in our dataset, so a paddle-format-valid skip
+            # gate would never trigger. If Qwen returns format-valid text it
+            # overwrites paddle; if Qwen returns UNKNOWN, paddle's output is
+            # preserved (this is what salvages numeric portrait reads).
             if self._qwen is not None and image.height > 2 * image.width:
-                paddle_clean = (text or "").upper().replace(" ", "")
-                paddle_format_ok = bool(_PORTRAIT_FORMAT_RE.match(paddle_clean))
-                if not text or not paddle_format_ok:
-                    qwen_text, qwen_conf = self._qwen.process_image(image)
-                    if qwen_text:
-                        logger.info(
-                            f"Qwen portrait fallback hit: '{qwen_text}' "
-                            f"(paddle was: {text!r})"
-                        )
-                        text, conf = qwen_text, qwen_conf
+                qwen_text, qwen_conf = self._qwen.process_image(image)
+                if qwen_text:
+                    logger.info(
+                        f"Qwen portrait fallback hit: '{qwen_text}' "
+                        f"(paddle was: {text!r})"
+                    )
+                    text, conf = qwen_text, qwen_conf
 
             if not text:
                 return None, 0.0
