@@ -19,6 +19,7 @@ class OcrProcessor:
     _instance = None
     _ocr = None
     _qwen = None  # EXP-25: Qwen3-VL portrait fallback (initialised if OPENROUTER_API_KEY set)
+    _qwen_horizontal = None  # EXP-30: Qwen3-VL horizontal no-text fallback
 
     def __new__(cls):
         if cls._instance is None:
@@ -53,7 +54,7 @@ class OcrProcessor:
             logger.error(f"Failed to initialize PaddleOCR: {e}")
             raise
 
-        # EXP-25: portrait Qwen3-VL fallback. Off if no OPENROUTER_API_KEY —
+        # EXP-25 / EXP-30: Qwen3-VL fallbacks. Off if no OPENROUTER_API_KEY —
         # service still runs as paddle-only in that case.
         if os.environ.get("OPENROUTER_API_KEY"):
             try:
@@ -63,8 +64,15 @@ class OcrProcessor:
             except Exception as e:
                 logger.warning(f"Qwen portrait fallback disabled: {e}")
                 self._qwen = None
+            try:
+                from app.qwen_horizontal import QwenHorizontalProcessor
+                self._qwen_horizontal = QwenHorizontalProcessor()
+                logger.info("Qwen horizontal fallback enabled (EXP-30).")
+            except Exception as e:
+                logger.warning(f"Qwen horizontal fallback disabled: {e}")
+                self._qwen_horizontal = None
         else:
-            logger.info("OPENROUTER_API_KEY not set — Qwen portrait fallback disabled.")
+            logger.info("OPENROUTER_API_KEY not set — Qwen fallbacks disabled.")
 
     def process_image(self, image: Image.Image) -> tuple:
         """
@@ -90,7 +98,22 @@ class OcrProcessor:
                 if text:
                     logger.info(f"Cascade Retry successful: '{text}'")
 
-            # 3. EXP-25: Portrait Qwen3-VL fallback. Always fires on portrait
+            # 3. EXP-30: Horizontal Qwen3-VL no-text fallback. Fires only on
+            # horizontal crops (w >= h, i.e. landscape / wide / very_wide)
+            # when paddle (incl. cascade retry) returned no text. Validated
+            # on dataset 20260423: rescues 3 of 7 paddle no-text horizontals
+            # (L906, 77233) at the cost of ~4 wrong-text introductions.
+            if (
+                not text
+                and self._qwen_horizontal is not None
+                and image.width >= image.height
+            ):
+                qwen_text, qwen_conf = self._qwen_horizontal.process_image(image)
+                if qwen_text:
+                    logger.info(f"Qwen horizontal fallback hit: '{qwen_text}'")
+                    text, conf = qwen_text, qwen_conf
+
+            # 4. EXP-25: Portrait Qwen3-VL fallback. Always fires on portrait
             # crops (h > 2w, i.e. stacked-vertical). Paddle's format-valid rate
             # on portrait is 0% in our dataset, so a paddle-format-valid skip
             # gate would never trigger. If Qwen returns format-valid text it

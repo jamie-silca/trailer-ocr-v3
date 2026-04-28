@@ -1,19 +1,50 @@
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Virtual environments
 .env
 .venv
 .venv-*/
 env/
 venv/
 ENV/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors / IDEs
 .idea/
 .vscode/
 .claude/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+
+# Project data / results
 tests/dataset/
 tests/results/*.json
 tests/results/*.log
 tests/results/qwen_cache/
 tests/results/qwen_local_cache/
+tests/results/qwen_horizontal_cache/
+tests/results/qwen_universal_cache/
 tests/results/got_ocr_cache/
 tests/eval_results/
